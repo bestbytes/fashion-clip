@@ -1,4 +1,5 @@
 import os
+import clip
 import torch
 import numpy as np
 from tqdm import tqdm
@@ -16,6 +17,8 @@ import json
 import validators
 from transformers import CLIPModel, CLIPProcessor
 from datasets import Dataset, Image
+from PIL import Image as PILImage
+
 
 _MODELS = {
     "fashion-clip": "patrickjohncyh/fashion-clip",
@@ -175,27 +178,37 @@ class FashionCLIP:
         return model, preprocessing, hash
 
     def encode_images(self, images: Union[List[str], List[PIL.Image.Image]], batch_size: int):
-        def transform_fn(el):
-             imgs = el['image'] if isinstance(el['image'][0], PIL.Image.Image) else [Image().decode_example(_) for _ in el['image']] 
-             return self.preprocess(images=imgs, return_tensors='pt')
-            
-        dataset = Dataset.from_dict({'image': images})
-        dataset = dataset.cast_column('image',Image(decode=False)) if isinstance(images[0], str) else dataset        
-        # dataset = dataset.map(map_fn,
-        #             batched=True,
-        #             remove_columns=['image'])
-        dataset.set_format('torch')
-        dataset.set_transform(transform_fn)
-        dataloader = DataLoader(dataset, batch_size=batch_size)
+        batches = self.load_and_transform_images(images, batch_size)
         image_embeddings = []
-        pbar = tqdm(total=len(images) // batch_size, position=0)
         with torch.no_grad():
-            for batch in dataloader:
-                batch = {k:v.to(self.device) for k,v in batch.items()}
-                image_embeddings.extend(self.model.get_image_features(**batch).detach().cpu().numpy())
-                pbar.update(1)
-            pbar.close()
+            for batch in batches:
+                batch = { 'pixel_values' : batch.to(self.device) }
+                image_features = self.model.get_image_features(**batch).detach().cpu().numpy()
+                image_embeddings.extend(image_features)
         return np.stack(image_embeddings)
+
+
+    def load_and_transform_images(self, images, batch_size):
+        batches = []
+
+        for i in range(0, len(images), batch_size):
+            batch = images[i:i+batch_size]
+            transformed_batch = []
+
+            for img in batch:
+                if isinstance(img, PIL.Image.Image):
+                    transformed = self.preprocess(images=[img], return_tensors='pt')
+                else:
+                    img = PILImage.open(img)
+                    transformed = self.preprocess(images=[img], return_tensors='pt')
+
+                transformed_tensor = transformed['pixel_values'].reshape([3, 224, 224])
+                transformed_batch.append(transformed_tensor)
+
+            transformed_batch = torch.stack(transformed_batch)
+            batches.append(transformed_batch)
+
+        return batches
 
     def encode_text(self, text: List[str], batch_size: int):
         dataset = Dataset.from_dict({'text': text})
@@ -297,4 +310,3 @@ class FashionCLIP:
         score = (score - np.min(score)) / (np.max(score) - np.min(score))
 
         return np.asarray(score), images[0]
-
